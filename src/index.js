@@ -5,15 +5,10 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { readFileSync } from 'fs';
 import dotenv from 'dotenv';
-import { GitHubAnalyzer } from './analyzers/github.js';
-import { LocalAnalyzer } from './analyzers/local.js';
-import { ClaudeAnalyzer } from './analyzers/claude.js';
-import { ReviewFormatter } from './formatters/reviewFormatter.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Load environment variables
 dotenv.config();
 
 const packageJson = JSON.parse(
@@ -23,232 +18,229 @@ const packageJson = JSON.parse(
 const program = new Command();
 
 program
-  .name('code-review')
-  .description('Claude-Powered Code Review Assistant - Analyze pull requests and provide thoughtful feedback')
+  .name('code-linter')
+  .description('Code quality linter - detect style issues, best practices, and code smells')
   .version(packageJson.version);
 
-// Command: Review a GitHub Pull Request
+// Quality rules
+const LINT_RULES = [
+  // JavaScript/TypeScript
+  { lang: ['js', 'ts', 'jsx', 'tsx'], pattern: /\bvar\s+\w+/g, issue: 'Use "let" or "const" instead of "var"', severity: 'warning' },
+  { lang: ['js', 'ts', 'jsx', 'tsx'], pattern: /console\.(log|debug|info)\(/g, issue: 'Remove debug statements', severity: 'warning' },
+  { lang: ['js', 'ts', 'jsx', 'tsx'], pattern: /TODO|FIXME|HACK:/g, issue: 'TODO/FIXME comment found', severity: 'info' },
+  { lang: ['js', 'ts', 'jsx', 'tsx'], pattern: /==(?!=)/g, issue: 'Use === instead of ==', severity: 'warning' },
+  { lang: ['js', 'ts', 'jsx', 'tsx'], pattern: /new\s+Array\(/g, issue: 'Use array literal []', severity: 'info' },
+  { lang: ['js', 'ts', 'jsx', 'tsx'], pattern: /throw\s+new\s+Error/g, issue: 'Just "throw Error" is enough', severity: 'info' },
+  // Python
+  { lang: ['py'], pattern: /except\s*:/g, issue: 'Use "except Exception:"', severity: 'warning' },
+  { lang: ['py'], pattern: /print\s*\(/g, issue: 'Consider using logging', severity: 'info' },
+  { lang: ['py'], pattern: /from\s+\w+\s+import\s+\*/g, issue: 'Avoid wildcard imports', severity: 'warning' },
+  // General
+  { pattern: /.{120,}/g, issue: 'Line exceeds 120 characters', severity: 'info' },
+  { pattern: /\s+$/gm, issue: 'Trailing whitespace', severity: 'info' },
+  { pattern: /\t/g, issue: 'Use spaces instead of tabs', severity: 'warning' },
+];
+
+function getExtension(filePath) {
+  return filePath.split('.').pop().toLowerCase();
+}
+
+function lintFile(filePath, content) {
+  const ext = getExtension(filePath);
+  const issues = [];
+  const lines = content.split('\n');
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lineNum = i + 1;
+    
+    for (const rule of LINT_RULES) {
+      // Check language compatibility
+      if (rule.lang && !rule.lang.includes(ext)) continue;
+      
+      // Check pattern
+      let match;
+      const regex = new RegExp(rule.pattern.source, rule.pattern.flags);
+      while ((match = regex.exec(line)) !== null) {
+        issues.push({
+          file: filePath,
+          line: lineNum,
+          issue: rule.issue,
+          severity: rule.severity,
+          column: match.index + 1
+        });
+      }
+    }
+  }
+  
+  return issues;
+}
+
+function calculateComplexity(content) {
+  const lines = content.split('\n');
+  let complexity = 1;
+  
+  for (const line of lines) {
+    if (/\bif\b|\bfor\b|\bwhile\b|\bswitch\b|\bcatch\b|\bcase\b/.test(line)) {
+      complexity++;
+    }
+  }
+  
+  return complexity;
+}
+
+// Lint command
+program
+  .command('lint')
+  .description('Lint files or directories')
+  .argument('<paths...>', 'Files or directories to lint')
+  .option('-r, --recursive', 'Lint directories recursively')
+  .option('-o, --output <file>', 'Save results to file')
+  .option('--fix', 'Auto-fix issues where possible')
+  .action(async (paths, options) => {
+    const fs = await import('fs');
+    const path = await import('path');
+    
+    console.log('🔍 Code Quality Linter\n');
+    
+    const allIssues = [];
+    let filesLinted = 0;
+    
+    for (const lintPath of paths) {
+      const stat = fs.statSync(lintPath);
+      
+      if (stat.isDirectory() && options.recursive) {
+        const lintDir = (dir) => {
+          const items = fs.readdirSync(dir);
+          for (const item of items) {
+            const fullPath = path.join(dir, item);
+            const itemStat = fs.statSync(fullPath);
+            if (itemStat.isDirectory()) {
+              lintDir(fullPath);
+            } else if (itemStat.isFile()) {
+              const content = fs.readFileSync(fullPath, 'utf-8');
+              const issues = lintFile(fullPath, content);
+              allIssues.push(...issues);
+              filesLinted++;
+            }
+          }
+        };
+        lintDir(lintPath);
+      } else if (stat.isFile()) {
+        const content = fs.readFileSync(lintPath, 'utf-8');
+        const issues = lintFile(lintPath, content);
+        allIssues.push(...issues);
+        filesLinted++;
+      }
+    }
+    
+    // Group by severity
+    const bySeverity = { error: 0, warning: 0, info: 0 };
+    for (const issue of allIssues) {
+      bySeverity[issue.severity]++;
+    }
+    
+    // Print results
+    console.log(`Linted ${filesLinted} files`);
+    console.log(`Found ${allIssues.length} issues\n`);
+    
+    if (allIssues.length > 0) {
+      console.log('═'.repeat(60));
+      console.log('LINT RESULTS');
+      console.log('═'.repeat(60));
+      
+      for (const issue of allIssues) {
+        const icon = issue.severity === 'error' ? '❌' : 
+                     issue.severity === 'warning' ? '⚠️' : 'ℹ️';
+        console.log(`${icon} [${issue.severity}] ${issue.file}:${issue.line}`);
+        console.log(`   ${issue.issue}\n`);
+      }
+      
+      console.log('═'.repeat(60));
+      console.log('SUMMARY');
+      console.log('═'.repeat(60));
+      console.log(`Errors: ${bySeverity.error}`);
+      console.log(`Warnings: ${bySeverity.warning}`);
+      console.log(`Info: ${bySeverity.info}`);
+    } else {
+      console.log('✅ No issues found!');
+    }
+    
+    if (options.output) {
+      fs.writeFileSync(options.output, JSON.stringify(allIssues, null, 2));
+      console.log(`\n📁 Results saved to: ${options.output}`);
+    }
+    
+    if (bySeverity.error > 0) {
+      process.exit(1);
+    }
+  });
+
+// Check complexity
+program
+  .command('complexity')
+  .description('Check code complexity')
+  .argument('<file>', 'File to analyze')
+  .action(async (filePath) => {
+    const fs = await import('fs');
+    
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const complexity = calculateComplexity(content);
+    
+    console.log(`\n📊 Complexity: ${complexity}\n`);
+    
+    if (complexity < 10) {
+      console.log('✅ Low complexity - easy to understand');
+    } else if (complexity < 20) {
+      console.log('⚠️  Moderate complexity - consider refactoring');
+    } else {
+      console.log('❌ High complexity - needs refactoring');
+    }
+  });
+
+// GitHub PR lint
 program
   .command('pr')
-  .description('Review a GitHub pull request')
-  .requiredOption('-o, --owner <owner>', 'Repository owner')
-  .requiredOption('-r, --repo <repo>', 'Repository name')
-  .requiredOption('-p, --pr-number <number>', 'Pull request number')
-  .option('-t, --token <token>', 'GitHub token (or set GITHUB_TOKEN env variable)')
-  .option('--no-post', 'Only analyze without posting review')
-  .option('--approval', 'Approve the PR after review')
-  .option('--format <format>', 'Output format: markdown, json, text', 'markdown')
+  .description('Lint GitHub PR changes')
+  .requiredOption('-o, --owner <owner>', 'Owner')
+  .requiredOption('-r, --repo <repo>', 'Repo')
+  .requiredOption('-p, --pr-number <number>', 'PR number')
   .action(async (options) => {
-    const token = options.token || process.env.GITHUB_TOKEN;
-    if (!token) {
-      console.error('Error: GitHub token required. Use --token or set GITHUB_TOKEN environment variable.');
-      process.exit(1);
-    }
-
-    const analyzer = new GitHubAnalyzer(token);
-    const claude = new ClaudeAnalyzer();
-    const formatter = new ReviewFormatter();
-
-    try {
-      console.log(`🔍 Fetching pull request #${options.prNumber} from ${options.owner}/${options.repo}...`);
-      
-      const prDetails = await analyzer.getPullRequest(options.owner, options.repo, options.prNumber);
-      const files = await analyzer.getPullRequestFiles(options.owner, options.repo, options.prNumber);
-      
-      console.log(`📄 Found ${files.length} changed files\n`);
-      
-      // Analyze each file
-      const reviews = [];
-      for (const file of files) {
-        console.log(`  Analyzing: ${file.filename}`);
-        const analysis = await claude.analyzeCode(file);
-        reviews.push({
-          filename: file.filename,
-          analysis,
-          changes: file
-        });
-      }
-      
-      // Generate overall review
-      const overallReview = await claude.generateOverallReview(prDetails, reviews);
-      
-      // Format output
-      const formatted = formatter.format(reviews, overallReview, options.format);
-      
-      console.log('\n' + '='.repeat(60));
-      console.log('CODE REVIEW RESULTS');
-      console.log('='.repeat(60));
-      console.log(formatted);
-      
-      // Post review if requested
-      if (!options.post) {
-        console.log('\n⚠️  Review not posted (--no-post flag set)');
-      } else {
-        const reviewBody = formatter.formatForGitHub(overallReview);
-        const event = options.approval ? 'APPROVE' : 'COMMENT';
-        
-        await analyzer.postReview(options.owner, options.repo, options.prNumber, {
-          body: reviewBody,
-          event
-        });
-        
-        console.log('\n✅ Review posted successfully!');
-      }
-    } catch (error) {
-      console.error('Error:', error.message);
-      process.exit(1);
-    }
-  });
-
-// Command: Review local changes (uncommitted or between branches)
-program
-  .command('local')
-  .description('Review local code changes (uncommitted or between branches)')
-  .option('-b, --base <branch>', 'Base branch to compare against', 'main')
-  .option('-c, --compare <branch>', 'Branch to compare (default: current branch)')
-  .option('--staged', 'Review only staged changes')
-  .option('--format <format>', 'Output format: markdown, json, text', 'markdown')
-  .option('-o, --output <file>', 'Save review to file')
-  .action(async (options) => {
-    const claude = new ClaudeAnalyzer();
-    const formatter = new ReviewFormatter();
-    
-    try {
-      const analyzer = new LocalAnalyzer();
-      
-      console.log('🔍 Analyzing local changes...');
-      
-      let files;
-      if (options.staged) {
-        files = await analyzer.getStagedChanges();
-      } else {
-        files = await analyzer.getBranchDiff(options.base, options.compare);
-      }
-      
-      console.log(`📄 Found ${files.length} changed files\n`);
-      
-      // Analyze each file
-      const reviews = [];
-      for (const file of files) {
-        console.log(`  Analyzing: ${file.filename}`);
-        const analysis = await claude.analyzeCode(file);
-        reviews.push({
-          filename: file.filename,
-          analysis,
-          changes: file
-        });
-      }
-      
-      // Generate overall review
-      const overallReview = await claude.generateLocalReview(reviews, options);
-      
-      // Format output
-      const formatted = formatter.format(reviews, overallReview, options.format);
-      
-      console.log('\n' + '='.repeat(60));
-      console.log('CODE REVIEW RESULTS');
-      console.log('='.repeat(60));
-      console.log(formatted);
-      
-      // Save to file if requested
-      if (options.output) {
-        const fs = await import('fs');
-        fs.writeFileSync(options.output, formatted);
-        console.log(`\n📁 Review saved to: ${options.output}`);
-      }
-    } catch (error) {
-      console.error('Error:', error.message);
-      process.exit(1);
-    }
-  });
-
-// Command: Setup and configuration
-program
-  .command('setup')
-  .description('Setup configuration and API keys')
-  .action(async () => {
-    const { writeFileSync } = await import('fs');
-    const envPath = join(process.cwd(), '.env.example');
-    
-    const exampleContent = `# Claude Code Review Assistant Configuration
-
-# GitHub Token (for PR reviews)
-# Get it from: https://github.com/settings/tokens
-GITHUB_TOKEN=your_github_token_here
-
-# Anthropic API Key (for Claude analysis)
-# Get it from: https://console.anthropic.com/
-ANTHROPIC_API_KEY=your_anthropic_api_key_here
-
-# Optional: Custom review settings
-# REVIEW_MAX_FILES=50
-# REVIEW_INCLUDE_STATS=true
-`;
-    
-    writeFileSync(envPath, exampleContent);
-    console.log('✅ Created .env.example configuration file');
-    console.log('\nTo configure:');
-    console.log('1. Copy .env.example to .env');
-    console.log('2. Add your GitHub token and/or Anthropic API key');
-    console.log('3. Run "code-review pr" or "code-review local" commands');
-  });
-
-// Command: GitHub Actions integration
-program
-  .command('action')
-  .description('Run in GitHub Actions context (automated from GITHUB_TOKEN env)')
-  .option('-e, --event-path <path>', 'GitHub event JSON file path')
-  .action(async (options) => {
+    const { Octokit } = await import('octokit');
     const token = process.env.GITHUB_TOKEN;
-    const eventPath = options.eventPath || process.env.GITHUB_EVENT_PATH;
     
     if (!token) {
-      console.error('Error: GITHUB_TOKEN environment variable required for GitHub Actions');
+      console.error('Error: GITHUB_TOKEN required');
       process.exit(1);
     }
     
-    if (!eventPath) {
-      console.error('Error: GitHub event file not found');
-      process.exit(1);
-    }
+    const octokit = new Octokit({ auth: token });
     
-    const fs = await import('fs');
-    const event = JSON.parse(fs.readFileSync(eventPath, 'utf8'));
+    console.log('🔍 Linting PR...\n');
     
-    if (!event.pull_request) {
-      console.log('Not a pull request event, skipping review');
-      process.exit(0);
-    }
-    
-    const analyzer = new GitHubAnalyzer(token);
-    const claude = new ClaudeAnalyzer();
-    const formatter = new ReviewFormatter();
-    
-    const owner = process.env.GITHUB_REPOSITORY?.split('/')[0];
-    const repo = process.env.GITHUB_REPOSITORY?.split('/')[1];
-    const prNumber = event.pull_request.number;
-    
-    console.log(`🔍 Running automated review for PR #${prNumber}`);
-    
-    const prDetails = await analyzer.getPullRequest(owner, repo, prNumber);
-    const files = await analyzer.getPullRequestFiles(owner, repo, prNumber);
-    
-    const reviews = [];
-    for (const file of files) {
-      const analysis = await claude.analyzeCode(file);
-      reviews.push({ filename: file.filename, analysis, changes: file });
-    }
-    
-    const overallReview = await claude.generateOverallReview(prDetails, reviews);
-    const reviewBody = formatter.formatForGitHub(overallReview);
-    
-    await analyzer.postReview(owner, repo, prNumber, {
-      body: reviewBody,
-      event: 'COMMENT'
+    const { data: files } = await octokit.rest.pulls.listFiles({
+      owner: options.owner,
+      repo: options.repo,
+      pull_number: parseInt(options.prNumber),
+      per_page: 100
     });
     
-    console.log('✅ Automated review posted');
+    let totalIssues = 0;
+    
+    for (const file of files) {
+      if (!file.patch) continue;
+      
+      const issues = lintFile(file.filename, file.patch);
+      if (issues.length > 0) {
+        totalIssues += issues.length;
+        console.log(`\n📄 ${file.filename}`);
+        for (const issue of issues.slice(0, 3)) {
+          console.log(`   ${issue.severity}: ${issue.issue}`);
+        }
+      }
+    }
+    
+    console.log(`\n✅ Found ${totalIssues} lint issues`);
   });
 
-// Parse and execute
 program.parse();

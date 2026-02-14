@@ -1,11 +1,11 @@
 {
-  "name": "claude-code-review-assistant",
+  "name": "code-quality-linter",
   "version": "1.0.0",
   "type": "module",
-  "description": "A Claude-powered code review assistant that analyzes pull requests and provides thoughtful, context-aware feedback",
+  "description": "Code quality linter - detect style issues, best practices, and code smells",
   "main": "src/index.js",
   "bin": {
-    "code-review": "./src/index.js"
+    "code-linter": "./src/index.js"
   },
   "scripts": {
     "start": "node src/index.js",
